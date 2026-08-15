@@ -187,7 +187,7 @@ function fileCardHTML(file, showDelete = false) {
       </div>
       ${tagsHTML ? `<div class="file-card-tags">${tagsHTML}</div>` : ''}
       <div class="file-card-actions">
-        <a href="/api/files/${file.id}/download" class="btn btn-sm btn-primary" download>⬇ Download</a>
+        <button class="btn btn-sm btn-primary" onclick="window.location.href='/api/files/${file.id}/download'">⬇ Download</button>
         ${showDelete ? `<button class="btn btn-sm btn-danger" onclick="deleteFile('${file.id}')">🗑 Delete</button>` : ''}
       </div>
     </div>
