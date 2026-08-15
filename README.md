@@ -2,7 +2,7 @@
 
 > Open file library — upload, share, and download files freely.
 
-A self-hosted file sharing platform where authenticated users can upload and manage files, while anyone can browse and download from the community library. Built with Node.js, Express, and SQLite.
+A self-hosted file sharing platform where authenticated users can upload and manage files, while anyone can browse and download from the community library. Built with Node.js, Express, and SQLite. Total community storage capped at 500 MB (Railway free plan).
 
 ---
 
@@ -12,7 +12,7 @@ A self-hosted file sharing platform where authenticated users can upload and man
 - **Authenticated Uploads** — Register/login to upload and manage your files
 - **Tag System** — Auto-categorized by file type + custom tags for easy filtering
 - **Search & Filter** — Find files by name or filter by tag category
-- **Storage Quota** — 1 GB total community storage with visual usage indicator
+- **Storage Quota** — 500 MB total community storage with visual usage indicator
 - **Drag & Drop** — Upload files with drag & drop and real-time progress tracking
 - **Premium Dark UI** — Glassmorphic design with animations and responsive layout
 
@@ -51,7 +51,7 @@ Create a `.env` file in the root:
 PORT=3000
 JWT_SECRET=your-secret-key-here
 MAX_FILE_SIZE_MB=100
-TOTAL_STORAGE_LIMIT_MB=1024
+TOTAL_STORAGE_LIMIT_MB=500
 ```
 
 > ⚠️ **Change `JWT_SECRET`** to a strong random string in production.
@@ -75,7 +75,7 @@ TOTAL_STORAGE_LIMIT_MB=1024
 5. Add a **Persistent Disk** mounted at `/app/uploads`
 6. Deploy!
 
-> **Important**: Both Railway and Render use ephemeral filesystems by default. You **must** attach a persistent volume/disk for the `uploads/` directory, otherwise files will be lost on redeploy.
+> **Note**: Railway's free tier includes **500 MB** of volume storage, which aligns with your app's 500 MB quota. If you're on the Hobby plan, you get up to 5 GB.
 
 ## API Endpoints
 

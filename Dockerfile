@@ -5,6 +5,8 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --production
 
+RUN apk add --no-cache sqlite
+
 COPY . .
 
 RUN mkdir -p uploads
