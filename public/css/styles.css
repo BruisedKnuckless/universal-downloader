@@ -647,19 +647,117 @@ img { max-width: 100%; display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Responsive ──────────────────────────────────────────────────────────── */
+
+/* Tablet & small laptop */
 @media (max-width: 768px) {
-  .navbar { padding: 0 1rem; }
-  .navbar-links { gap: 0.2rem; }
-  .navbar-links a, .navbar-links button { padding: 0.4rem 0.7rem; font-size: 0.8rem; }
-  .hero { padding: 2.5rem 1rem 1.5rem; }
-  .hero h1 { font-size: 1.8rem; }
-  .files-grid { grid-template-columns: 1fr; }
-  .auth-card { padding: 1.5rem; }
-  .upload-zone { padding: 2rem 1rem; }
+  .navbar { padding: 0 0.75rem; gap: 0.5rem; }
+  .navbar-brand { font-size: 1rem; gap: 0.4rem; }
+  .navbar-brand .logo-icon { width: 28px; height: 28px; font-size: 0.85rem; }
+  .navbar-links { gap: 0.15rem; }
+  .navbar-links a, .navbar-links button {
+    padding: 0.35rem 0.6rem; font-size: 0.75rem;
+  }
+
+  .hero { padding: 2rem 1rem 1.2rem; }
+  .hero h1 { font-size: 1.6rem; }
+  .hero p { font-size: 0.9rem; margin-bottom: 1.2rem; }
+
+  .container { padding: 0 0.75rem; }
+  .files-grid { grid-template-columns: 1fr; gap: 0.8rem; }
+
+  .file-card { padding: 1rem; }
+  .file-card-actions { flex-wrap: wrap; }
+  .file-card-actions .btn { font-size: 0.75rem; padding: 0.35rem 0.8rem; }
+
+  .auth-page { padding: 1rem; }
+  .auth-card { padding: 1.5rem; border-radius: var(--radius-lg); }
+
+  .dashboard-header { padding: 1.5rem 0 1rem; }
+  .dashboard-header h1 { font-size: 1.4rem; }
+  .dashboard-header p { font-size: 0.85rem; }
+
+  .upload-zone { padding: 1.5rem 1rem; }
+  .upload-zone .upload-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+  .upload-zone h3 { font-size: 1rem; }
+
+  .upload-form { padding: 1rem; }
+
+  .tags-filter { gap: 0.35rem; margin-bottom: 1.5rem; }
+  .tag-pill { padding: 0.3rem 0.75rem; font-size: 0.72rem; }
+
+  .footer { padding: 1.2rem 0.75rem; margin-top: 2rem; }
 }
+
+/* Phone */
 @media (max-width: 480px) {
+  .navbar { height: 56px; padding: 0 0.5rem; flex-wrap: nowrap; }
   .navbar-brand span { display: none; }
-  .files-grid { gap: 0.8rem; }
+  .navbar-brand .logo-icon { width: 30px; height: 30px; }
+  .navbar-links { gap: 0.1rem; flex-shrink: 0; }
+  .navbar-links a, .navbar-links button {
+    padding: 0.3rem 0.45rem; font-size: 0.7rem;
+  }
+
+  .hero { padding: 1.2rem 0.75rem 1rem; }
+  .hero h1 { font-size: 1.35rem; margin-bottom: 0.3rem; }
+  .hero p { font-size: 0.82rem; margin-bottom: 1rem; }
+
+  .search-container { margin-bottom: 1rem; }
+  .search-container .input { font-size: 0.85rem; padding: 0.6rem 0.8rem 0.6rem 2.4rem; }
+
+  .storage-bar-container { margin-bottom: 0.6rem; }
+
+  .container { padding: 0 0.5rem; }
+  .files-grid { gap: 0.6rem; }
+
+  .file-card { padding: 0.85rem; gap: 0.5rem; }
+  .file-type-badge { width: 36px; height: 36px; font-size: 0.6rem; }
+  .file-card-header { gap: 0.6rem; }
+  .file-card-name { font-size: 0.85rem; }
+  .file-card-meta { font-size: 0.7rem; gap: 0.4rem; }
+  .file-card-tags .mini-tag { font-size: 0.62rem; padding: 0.1rem 0.4rem; }
+
+  .file-card-actions {
+    flex-direction: row; flex-wrap: wrap; gap: 0.4rem;
+  }
+  .file-card-actions .btn {
+    flex: 1 1 auto; min-width: 0;
+    font-size: 0.72rem; padding: 0.4rem 0.6rem;
+    text-align: center; justify-content: center;
+  }
+
+  .dashboard-header { padding: 1rem 0 0.8rem; }
+  .dashboard-header h1 { font-size: 1.25rem; }
+  .dashboard-header p { font-size: 0.8rem; }
+
+  .upload-zone { padding: 1.2rem 0.75rem; border-radius: var(--radius-lg); }
+  .upload-zone .upload-icon { font-size: 1.8rem; margin-bottom: 0.4rem; }
+  .upload-zone h3 { font-size: 0.9rem; }
+  .upload-zone p { font-size: 0.75rem; }
+
+  .upload-form { padding: 0.85rem; }
+  .upload-file-preview { padding: 0.6rem 0.75rem; gap: 0.6rem; }
+  .upload-file-preview .preview-name { font-size: 0.85rem; }
+
+  .suggested-tags { gap: 0.25rem; }
+  .suggested-tags .suggestion { font-size: 0.68rem; padding: 0.15rem 0.5rem; }
+
+  .my-files-header h2 { font-size: 1.1rem; }
+
+  .auth-page { padding: 0.75rem; }
+  .auth-card { padding: 1.2rem; }
+  .auth-card h2 { font-size: 1.3rem; }
+  .auth-tabs { margin-bottom: 1.5rem; }
+  .auth-tab { font-size: 0.8rem; padding: 0.45rem; }
+  .input { font-size: 0.85rem; padding: 0.6rem 0.85rem; }
+
+  .toast-container { bottom: 0.75rem; right: 0.75rem; left: 0.75rem; }
+  .toast { font-size: 0.8rem; padding: 0.6rem 0.9rem; }
+
+  .footer { font-size: 0.75rem; padding: 1rem 0.5rem; margin-top: 1.5rem; }
+
+  .bg-glow::before { width: 300px; height: 300px; }
+  .bg-glow::after { width: 250px; height: 250px; }
 }
 
 /* ── Scrollbar ───────────────────────────────────────────────────────────── */
