@@ -23,6 +23,9 @@ async function initDB() {
     db = new SQL.Database();
   }
 
+  // Enable foreign key enforcement
+  db.run('PRAGMA foreign_keys = ON');
+
   // Create tables
   db.run(`
     CREATE TABLE IF NOT EXISTS users (

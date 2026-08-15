@@ -1,9 +1,12 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { getDB, saveDB } = require('../db/init');
 const { authRequired } = require('../middleware/auth');
+const { UPLOADS_DIR } = require('../middleware/upload');
 
 const router = express.Router();
 
@@ -21,6 +24,22 @@ function queryOne(sql, params = []) {
   }
   stmt.free();
   return row;
+}
+
+function queryAll(sql, params = []) {
+  const db = getDB();
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const rows = [];
+  while (stmt.step()) {
+    const cols = stmt.getColumnNames();
+    const vals = stmt.get();
+    const row = {};
+    cols.forEach((c, i) => row[c] = vals[i]);
+    rows.push(row);
+  }
+  stmt.free();
+  return rows;
 }
 
 // ── Register ────────────────────────────────────────────────────────────────
@@ -97,4 +116,34 @@ router.get('/me', authRequired, (req, res) => {
   res.json({ user });
 });
 
+// ── Delete account (auth required — deletes user + all their files) ─────────
+router.delete('/account', authRequired, (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // 1. Get all files belonging to this user
+    const files = queryAll('SELECT stored_name FROM files WHERE user_id = ?', [userId]);
+
+    // 2. Delete physical files from disk
+    files.forEach(f => {
+      const filePath = path.join(UPLOADS_DIR, f.stored_name);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    });
+
+    // 3. Delete file records from DB
+    const db = getDB();
+    db.run('DELETE FROM files WHERE user_id = ?', [userId]);
+
+    // 4. Delete user record
+    db.run('DELETE FROM users WHERE id = ?', [userId]);
+    saveDB();
+
+    res.json({ message: 'Account and all files deleted successfully' });
+  } catch (err) {
+    console.error('Delete account error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;
+
