@@ -36,7 +36,7 @@
 
   --text-primary: #111111;
   --text-secondary: #444444;
-  --text-muted: #999999;
+  --text-muted: #555555;
 
   --accent: #e60000;
   --accent-light: #ff1a1a;
@@ -49,8 +49,8 @@
   --warning: #cc9900;
   --info: #111111;
 
-  --border: rgba(0, 0, 0, 0.1);
-  --border-hover: rgba(0, 0, 0, 0.2);
+  --border: rgba(0, 0, 0, 0.18);
+  --border-hover: rgba(0, 0, 0, 0.3);
 
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -91,11 +91,12 @@ html {
 
 body {
   font-family: var(--font-body);
-  background: #ffffff;
+  background: #ffffff url('/fonts/white-paper-texture2.jpg') center top / 100% auto scroll repeat-y;
   color: #111111;
   min-height: 100vh;
   line-height: 1.6;
   overflow-x: hidden;
+  text-shadow: 0 0 10px rgba(255, 255, 255, 1), 0 0 20px rgba(255, 255, 255, 0.8), 0 1px 5px rgba(0, 0, 0, 0.4);
 }
 
 a {
@@ -128,10 +129,9 @@ img {
   justify-content: space-between;
   padding: 0 2rem;
   height: 64px;
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgb(255, 255, 255);
   border-bottom: 1px solid var(--border);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 }
 
 .navbar-brand {
@@ -142,6 +142,7 @@ img {
   font-weight: 700;
   font-size: 1.15rem;
   color: #111111;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 }
 
 .navbar-brand .logo-icon {
@@ -175,6 +176,7 @@ img {
   border: none;
   cursor: pointer;
   transition: all var(--fast);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
 }
 
 .navbar-links a:hover,
@@ -1485,8 +1487,8 @@ img {
   letter-spacing: 1px;
   cursor: default;
   user-select: none;
-  font-size: 100px;
-
+  font-size: clamp(2.5rem, 13vw, 100px);
+  white-space: nowrap;
 }
 
 
