@@ -164,12 +164,20 @@ function renderNav() {
 }
 
 // ── File Card HTML ──────────────────────────────────────────────────────────
+function isPreviewable(mimeType) {
+  return mimeType && (mimeType.startsWith('image/') || mimeType === 'application/pdf');
+}
+
 function fileCardHTML(file, showDelete = false) {
   const ext = getFileExtension(file.original_name);
   const typeClass = getFileTypeClass(file.tags);
   const tagsHTML = (file.tags || []).map(t =>
     `<span class="mini-tag">${t}</span>`
   ).join('');
+
+  const previewBtn = isPreviewable(file.mime_type)
+    ? `<button class="btn btn-sm btn-secondary" onclick="window.open('/api/files/${file.id}/preview', '_blank')">👁 Preview</button>`
+    : '';
 
   return `
     <div class="file-card" style="animation-delay: ${Math.random() * 0.15}s">
@@ -187,6 +195,7 @@ function fileCardHTML(file, showDelete = false) {
       </div>
       ${tagsHTML ? `<div class="file-card-tags">${tagsHTML}</div>` : ''}
       <div class="file-card-actions">
+        ${previewBtn}
         <button class="btn btn-sm btn-primary" onclick="window.location.href='/api/files/${file.id}/download'">⬇ Download</button>
         ${showDelete ? `<button class="btn btn-sm btn-danger" onclick="deleteFile('${file.id}')">🗑 Delete</button>` : ''}
       </div>

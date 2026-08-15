@@ -179,6 +179,24 @@ router.get('/:id/download', (req, res) => {
   }
 });
 
+// ── Preview / inline view (public) ─────────────────────────────────────────
+router.get('/:id/preview', (req, res) => {
+  try {
+    const file = queryOne('SELECT * FROM files WHERE id = ?', [req.params.id]);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+
+    const filePath = path.join(UPLOADS_DIR, file.stored_name);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing from storage' });
+
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.original_name)}"`);
+    res.setHeader('Content-Type', file.mime_type);
+    res.sendFile(filePath);
+  } catch (err) {
+    console.error('Preview error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Delete (auth required, owner only) ──────────────────────────────────────
 router.delete('/:id', authRequired, (req, res) => {
   try {
