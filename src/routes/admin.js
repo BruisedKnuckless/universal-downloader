@@ -118,14 +118,22 @@ router.post('/cleanup', (_req, res) => {
     const dbNames = new Set(dbFiles.map(f => f.stored_name));
 
     // Scan uploads dir
-    const diskFiles = fs.readdirSync(UPLOADS_DIR).filter(f => f !== 'data.db');
+    const diskFiles = fs.readdirSync(UPLOADS_DIR);
 
     let removed = 0;
     let freedBytes = 0;
     diskFiles.forEach(filename => {
+      // Skip the database file
+      if (filename === 'data.db') return;
+
+      const filePath = path.join(UPLOADS_DIR, filename);
+      const stat = fs.statSync(filePath);
+
+      // Skip directories
+      if (stat.isDirectory()) return;
+
+      // If file is not tracked in DB, it's orphaned — delete it
       if (!dbNames.has(filename)) {
-        const filePath = path.join(UPLOADS_DIR, filename);
-        const stat = fs.statSync(filePath);
         freedBytes += stat.size;
         fs.unlinkSync(filePath);
         removed++;
@@ -138,7 +146,7 @@ router.post('/cleanup', (_req, res) => {
     });
   } catch (err) {
     console.error('Admin cleanup error:', err);
-    res.status(500).json({ error: 'Cleanup failed' });
+    res.status(500).json({ error: 'Cleanup failed: ' + err.message });
   }
 });
 
