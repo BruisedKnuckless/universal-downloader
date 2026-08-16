@@ -572,4 +572,134 @@ document.addEventListener('DOMContentLoaded', () => {
   if (page === 'library') initLibrary();
   else if (page === 'auth') initAuth();
   else if (page === 'dashboard') initDashboard();
+
+  // ── Secret trap door: click the A in VIRAJ'S VAULT 5 times ────────────
+  const trapDoor = document.getElementById('trap-door');
+  if (trapDoor) {
+    let tapCount = 0;
+    let tapTimer = null;
+    trapDoor.addEventListener('click', (e) => {
+      e.stopPropagation();
+      tapCount++;
+      clearTimeout(tapTimer);
+      tapTimer = setTimeout(() => tapCount = 0, 2000);
+      if (tapCount >= 5) {
+        tapCount = 0;
+        openAdminPanel();
+      }
+    });
+  }
 });
+
+// ── Admin Panel ─────────────────────────────────────────────────────────────
+let adminSecret = null;
+
+function openAdminPanel() {
+  // Prompt for secret
+  const secret = prompt('🔐 Enter admin secret:');
+  if (!secret) return;
+  adminSecret = secret;
+
+  // Create overlay
+  const overlay = document.createElement('div');
+  overlay.id = 'admin-overlay';
+  overlay.innerHTML = `
+    <div id="admin-panel">
+      <div class="admin-header">
+        <h2>⚙️ ADMIN PANEL</h2>
+        <button id="admin-close" class="btn btn-ghost">✕</button>
+      </div>
+      <div class="admin-actions">
+        <button id="admin-cleanup" class="btn btn-danger btn-sm">🧹 Cleanup orphaned files</button>
+      </div>
+      <div id="admin-users-list"><div class="spinner"></div> Loading users...</div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Style it inline (keeps it self-contained, no CSS file changes needed)
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:grid;place-items:center;padding:1rem;';
+  const panel = overlay.querySelector('#admin-panel');
+  panel.style.cssText = 'background:#fff;border-radius:16px;padding:1.5rem;max-width:700px;width:100%;max-height:85vh;overflow-y:auto;color:#111;font-family:inherit;box-shadow:0 8px 40px rgba(0,0,0,0.3);';
+
+  const header = panel.querySelector('.admin-header');
+  header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;';
+  header.querySelector('h2').style.cssText = 'font-size:1.3rem;margin:0;';
+
+  const actions = panel.querySelector('.admin-actions');
+  actions.style.cssText = 'margin-bottom:1rem;';
+
+  // Close
+  overlay.querySelector('#admin-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  // Cleanup
+  overlay.querySelector('#admin-cleanup').addEventListener('click', async () => {
+    if (!confirm('Remove all orphaned files from disk?')) return;
+    try {
+      const res = await fetch('/api/admin/cleanup', {
+        method: 'POST',
+        headers: { 'x-admin-secret': adminSecret }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      alert(`✅ ${data.message}\nFreed: ${data.freedMB} MB`);
+      loadStorageBar();
+    } catch (err) {
+      alert('❌ ' + err.message);
+    }
+  });
+
+  // Load users
+  loadAdminUsers();
+}
+
+async function loadAdminUsers() {
+  const container = document.getElementById('admin-users-list');
+  if (!container) return;
+  try {
+    const res = await fetch('/api/admin/users', {
+      headers: { 'x-admin-secret': adminSecret }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    if (!data.users.length) {
+      container.innerHTML = '<p style="color:#999;text-align:center;padding:2rem;">No users found</p>';
+      return;
+    }
+
+    container.innerHTML = data.users.map(u => `
+      <div class="admin-user-row" style="display:flex;align-items:center;justify-content:space-between;padding:0.75rem 1rem;border:1px solid rgba(0,0,0,0.1);border-radius:10px;margin-bottom:0.5rem;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:700;font-size:0.95rem;">${u.username}</div>
+          <div style="font-size:0.78rem;color:#666;">${u.email}</div>
+          <div style="font-size:0.72rem;color:#999;">📁 ${u.file_count} files · ${(u.total_bytes / 1024 / 1024).toFixed(2)} MB · Joined ${u.created_at}</div>
+        </div>
+        <button onclick="adminDeleteUser('${u.id}', '${u.username}')" 
+                style="background:#e60000;color:#fff;border:none;border-radius:8px;padding:0.4rem 0.9rem;font-size:0.8rem;cursor:pointer;font-weight:600;white-space:nowrap;">
+          🗑 Delete
+        </button>
+      </div>
+    `).join('');
+  } catch (err) {
+    container.innerHTML = `<p style="color:red;text-align:center;">❌ ${err.message}</p>`;
+  }
+}
+
+async function adminDeleteUser(userId, username) {
+  if (!confirm(`⚠️ Permanently delete user "${username}" and ALL their files?`)) return;
+  try {
+    const res = await fetch(`/api/admin/users/${userId}`, {
+      method: 'DELETE',
+      headers: { 'x-admin-secret': adminSecret }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    alert(`✅ ${data.message}\n${data.filesRemoved} files removed from disk`);
+    loadAdminUsers();
+    loadStorageBar();
+  } catch (err) {
+    alert('❌ ' + err.message);
+  }
+}

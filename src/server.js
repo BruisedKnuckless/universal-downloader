@@ -29,6 +29,7 @@ async function start() {
   // API routes
   app.use('/api/auth', require('./routes/auth'));
   app.use('/api/files', require('./routes/files'));
+  app.use('/api/admin', require('./routes/admin'));
 
   // SPA-style fallback for HTML pages
   app.get('*', (req, res) => {

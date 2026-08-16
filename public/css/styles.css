@@ -1516,3 +1516,9 @@ img {
   width: 30px;
 
 }
+
+.hero h1.maintext span:active {
+  transform: scale(0.8);
+  transition: all 100ms ease;
+  text-shadow: 1px 1px 1px black;
+}
