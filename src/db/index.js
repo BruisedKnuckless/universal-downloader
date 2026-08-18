@@ -1,4 +1,16 @@
-const { createClient } = require('@libsql/client');
+/**
+ * Two client builds ship in this package. The default one pulls in a native
+ * binary so it can open `file:` databases; the `/web` one is pure fetch.
+ * Production always talks to a remote libsql:// URL, so it takes the web
+ * build — no native module inside the serverless function, and a smaller
+ * deployment. Local `file:` development gets the native build.
+ */
+function loadCreateClient(url) {
+  const isRemote = /^(libsql|wss?|https?):/.test(url);
+  return isRemote
+    ? require('@libsql/client/web').createClient
+    : require('@libsql/client').createClient;
+}
 
 /**
  * Data layer backed by Turso (libSQL).
@@ -19,6 +31,7 @@ function getClient() {
   const url = process.env.TURSO_DATABASE_URL;
   if (!url) throw new Error('TURSO_DATABASE_URL is not set');
 
+  const createClient = loadCreateClient(url);
   client = createClient({
     url,
     // Local file: databases need no token.

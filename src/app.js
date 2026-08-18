@@ -27,9 +27,18 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static frontend. On Vercel these are served by the CDN instead
-// (see vercel.json), so this only does work locally and on Railway.
-app.use(express.static(path.join(__dirname, '../public')));
+// Serve the static frontend. Vercel routes every request to this app, so the
+// max-age matters: it lets the CDN cache fonts and CSS instead of waking a
+// function for each one. HTML stays uncached so deploys are picked up at once.
+app.use(express.static(path.join(__dirname, '../public'), {
+  maxAge: '1h',
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+    else if (/\.(otf|ttf|woff2?)$/.test(filePath)) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  }
+}));
 
 // API routes
 app.use('/api/auth', require('./routes/auth'));
