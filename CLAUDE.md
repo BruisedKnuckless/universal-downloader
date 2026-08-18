@@ -10,8 +10,14 @@
 **Viraj's Vault** (internally "Universal Downloader") is a self-hosted, open file-sharing web application. Users can register, upload files, tag them, and share them publicly. Anyone can browse and download files without an account.
 
 - **Live URL**: `viraj-vault.up.railway.app`
-- **Hosting**: Railway (free tier — 500 MB storage, $5/month credit)
-- **Repository**: GitHub → deployed to Railway via auto-deploy on push
+- **Hosting**: Railway **and** Vercel, running the same code against one shared backend
+- **Repository**: GitHub → auto-deploy on push (`main` → Railway, `vercel` → Vercel)
+
+### Branches
+| Branch | Deploys to | Notes |
+|---|---|---|
+| `main` | Railway | Historically the disk-based version |
+| `vercel` | Vercel (and Railway) | Cloud backend — Turso + Vercel Blob |
 
 ---
 
@@ -19,11 +25,12 @@
 
 | Layer | Technology | Notes |
 |-------|-----------|-------|
-| **Runtime** | Node.js 20 (Alpine Docker) | `node:20-alpine` in Dockerfile |
+| **Runtime** | Node.js 20 | Docker on Railway, serverless function on Vercel |
 | **Framework** | Express.js 4.x | Serves both API and static frontend |
-| **Database** | SQLite via `sql.js` (WASM) | **NOT** `better-sqlite3` — see critical notes below |
+| **Database** | Turso / libSQL (`@libsql/client`) | SQLite over HTTPS — reachable from both hosts |
+| **File storage** | Vercel Blob (`@vercel/blob`) | Works off-Vercel too via `BLOB_READ_WRITE_TOKEN` |
 | **Auth** | JWT (jsonwebtoken) + bcryptjs | 7-day token expiry |
-| **File uploads** | Multer | Files stored in `/uploads/` directory |
+| **File uploads** | Direct browser → Blob | No Multer; server only issues capped tokens |
 | **Frontend** | Vanilla HTML/CSS/JS | No frameworks — single `app.js` file |
 | **Fonts** | Custom: BebasNeue, Nohemi, NetflixSans | Loaded via `@font-face` from `/fonts/` |
 
@@ -31,40 +38,47 @@
 
 ## 3. Critical Architecture Notes
 
-### 3.1 sql.js is IN-MEMORY (⚠️ MOST IMPORTANT)
+### 3.1 Nothing is stored on disk (⚠️ MOST IMPORTANT)
 
-`sql.js` is a WASM port of SQLite that loads the **entire database file into JavaScript memory** at startup. This has critical implications:
+The app writes **no** application data to the filesystem. This is what lets it run on Vercel, where
+functions get a read-only filesystem (apart from an ephemeral `/tmp`) and no persistent volume.
 
 ```
-App starts → reads /uploads/data.db into RAM → all queries hit RAM copy
-                                                 (disk file is stale until saveDB() is called)
+Browser ──upload──────────────────────────────► Vercel Blob
+   │                                                 ▲
+   └──1. ask for token──► Express ──2. record──► Turso DB
+                          (Vercel or Railway)
 ```
 
-- **All reads and writes happen in memory**, not on disk.
-- **`saveDB()`** must be called after every write operation to persist changes to `/uploads/data.db`.
-- **External CLI edits** (e.g., `sqlite3 /app/uploads/data.db`) modify the disk file but the running app doesn't know — it keeps using its stale in-memory copy.
-- **If the app calls `saveDB()` after a CLI edit**, it **overwrites** the disk file with its in-memory state, reverting the CLI changes.
-- **Restarting the app** forces it to reload from the (updated) disk file.
+- **Database** is Turso (libSQL) over HTTPS. Every write lands immediately — there is no in-memory
+  copy and **no `saveDB()`**. The old stale-copy footgun is gone.
+- **Files** live in Vercel Blob, addressed by the `blob_url` column.
+- **Both hosts share one backend**, so a file uploaded on Vercel appears on Railway and vice versa.
+- Schema is created lazily by a memoized `ensureSchema()` in `src/db/index.js`, because serverless
+  functions have no reliable startup hook.
 
-**Why not `better-sqlite3`?** It requires C++ compilation and failed on Railway's container (Node 26.4.0). `sql.js` is pure WASM and works everywhere.
-
-**Rule: NEVER suggest using `better-sqlite3` or switching databases without testing on Railway first.**
+**Rule: never reintroduce disk persistence** (`fs.writeFileSync` for data, multer disk storage,
+SQLite files). It would work on Railway and silently break Vercel.
 
 ### 3.2 File Storage
 
-- **Physical files** are stored in `/uploads/` (mapped to `/app/uploads/` in Docker).
-- **Database file** (`data.db`) also lives in `/uploads/` for persistence across redeployments.
-- On Railway, `/app/uploads/` is a **persistent volume** — it survives redeployments.
-- **Max file size**: no fixed per-file cap. Multer is sized per request to the storage remaining (`uploadWithLimit()` in `middleware/upload.js`), so a single file may be as large as the free space under the total quota.
-- **Total storage limit**: 500 MB (Railway free plan limit, configurable via `TOTAL_STORAGE_LIMIT_MB`).
+- **Uploads go straight from the browser to Blob.** The server never receives the bytes; it only
+  issues a short-lived token (`POST /api/files/upload-token`).
+- **Why:** Vercel functions reject request bodies over **4.5 MB**. Routing uploads through the
+  server would cap files at 4.5 MB there.
+- **Downloads and previews are 302 redirects** to the blob URL. The same 4.5 MB cap applies to
+  *responses*, so a large file cannot be streamed through the function at all.
+- **Max file size**: no fixed per-file cap. The upload token is capped at
+  `maximumSizeInBytes = remaining quota`, so Blob itself refuses anything larger.
+- **Total storage limit**: 500 MB, configurable via `TOTAL_STORAGE_LIMIT_MB`.
 
 ### 3.3 Orphaned Files Problem
 
-When a user is deleted, their database records can be cascade-deleted, but the physical files on disk may survive if:
-1. The delete was done via SQLite CLI (no filesystem cleanup)
-2. The app crashed between DB delete and file cleanup
+A blob can outlive its database row if the browser uploads successfully but never reaches
+`POST /api/files/confirm` (tab closed, connection dropped).
 
-The admin panel has a **"Cleanup orphaned files"** button that scans `/uploads/` and removes any physical files not tracked in the `files` table.
+The admin panel's **"Cleanup orphaned files"** button lists the blob store and deletes anything
+whose `pathname` has no matching `stored_name` in the `files` table.
 
 ---
 
@@ -74,30 +88,43 @@ The admin panel has a **"Cleanup orphaned files"** button that scans `/uploads/`
 Universal Downloader/
 ├── .env                          # Environment variables (DO NOT commit to public repos)
 ├── .gitignore                    # Ignores node_modules, uploads/, data.db
-├── Dockerfile                    # node:20-alpine + sqlite3 CLI
+├── .vercelignore                 # Keeps the Docker/Railway bits out of the Vercel bundle
+├── vercel.json                   # Static public/, rewrites /api/* to the Express function
+├── Dockerfile                    # node:20-alpine (Railway)
 ├── Procfile                      # Railway/Heroku: "web: node src/server.js"
 ├── package.json                  # Dependencies and scripts
 │
+├── api/
+│   └── index.js                  # Vercel entry point — exports the Express app
+│
+├── scripts/
+│   ├── build-client.js           # esbuild → public/js/vendor/blob-client.js
+│   └── migrate-to-cloud.js       # One-time: old data.db + uploads/ → Turso + Blob
+│
 ├── src/                          # Backend source
-│   ├── server.js                 # Express app bootstrap, route registration
+│   ├── app.js                    # Builds the Express app (no listen) + env validation
+│   ├── server.js                 # listen() wrapper for local/Railway
 │   ├── db/
-│   │   └── init.js               # sql.js database init, saveDB(), getDB()
+│   │   └── index.js              # Turso client, ensureSchema(), one()/all()/run()
+│   ├── storage/
+│   │   └── blob.js               # Vercel Blob wrappers: head, remove, removeMany, listAll
 │   ├── middleware/
-│   │   ├── auth.js               # JWT auth middleware (authRequired, authOptional)
-│   │   └── upload.js             # Multer config, UPLOADS_DIR export
+│   │   └── auth.js               # JWT auth middleware (authRequired, authOptional)
 │   └── routes/
 │       ├── auth.js               # POST /register, POST /login, GET /me, DELETE /account
-│       ├── files.js              # CRUD for files, storage-info, tags, download, preview
+│       ├── files.js              # List, upload-token, confirm, download, preview, delete
 │       └── admin.js              # Admin-only routes (list users, delete user, cleanup)
 │
-├── public/                       # Static frontend (served by Express)
+├── public/                       # Static frontend (Express locally, Vercel CDN in prod)
 │   ├── index.html                # Library page (public file browser)
 │   ├── auth.html                 # Login/Register page
 │   ├── dashboard.html            # Authenticated user's upload/manage page
 │   ├── css/
 │   │   └── styles.css            # ALL styling — single file, CSS custom properties
 │   ├── js/
-│   │   └── app.js                # ALL frontend logic — single file, vanilla JS
+│   │   ├── app.js                # ALL frontend logic — single file, vanilla JS
+│   │   └── vendor/
+│   │       └── blob-client.js    # Committed esbuild bundle of @vercel/blob/client
 │   └── fonts/
 │       ├── BebasNeue.otf         # Main heading font
 │       ├── Nohemi-VF-BF6438cc58ad63d.ttf  # Secondary heading font
@@ -105,8 +132,7 @@ Universal Downloader/
 │       ├── white-paper-texture.jpg    # Navbar background texture
 │       └── white-paper-texture2.jpg   # Page background texture
 │
-├── uploads/                      # File storage (gitignored, persistent volume on Railway)
-│   └── data.db                   # SQLite database file
+├── uploads/                      # Local dev only (gitignored) — holds local.db
 │
 └── fonts/                        # Source font files (NOT served — copies are in public/fonts/)
 ```
@@ -129,7 +155,8 @@ CREATE TABLE users (
 CREATE TABLE files (
     id TEXT PRIMARY KEY,              -- UUID v4
     original_name TEXT NOT NULL,       -- User's original filename
-    stored_name TEXT NOT NULL,         -- UUID-based filename on disk
+    stored_name TEXT NOT NULL UNIQUE,  -- Blob pathname (UNIQUE: stops one blob being claimed twice)
+    blob_url TEXT NOT NULL,            -- Public Vercel Blob URL
     mime_type TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
     tags TEXT DEFAULT '[]',            -- JSON array of tag strings
@@ -155,19 +182,25 @@ CREATE INDEX idx_files_uploaded_at ON files(uploaded_at);
 | POST | `/register` | No | Create account. Body: `{ username, email, password }` |
 | POST | `/login` | No | Login. Body: `{ email, password }`. Returns JWT |
 | GET | `/me` | JWT | Get current user info |
-| DELETE | `/account` | JWT | Delete own account + all files (DB + disk) |
+| DELETE | `/account` | JWT | Delete own account + all files (DB + blobs) |
 
 ### Files (`/api/files/`)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/` | No | List files. Query params: `page`, `limit`, `tag`, `search` |
-| POST | `/upload` | JWT | Upload file. Multipart: `file` + `tags` (comma-separated) |
+| POST | `/upload-token` | JWT | Issue a Blob client token capped at the remaining quota |
+| POST | `/confirm` | JWT | Record a finished upload. Body: `{ url, originalName, tags }` |
 | GET | `/storage-info` | No | Get `{ totalLimit, totalUsed, remaining }` |
 | GET | `/tags` | No | Get all unique tags across files |
-| GET | `/download/:id` | No | Download a file (increments download_count) |
-| GET | `/preview/:id` | No | Inline preview (Content-Disposition: inline) |
-| DELETE | `/:id` | JWT | Delete own file (DB + disk) |
+| GET | `/:id/download` | No | 302 → blob `?download=1` (increments download_count) |
+| GET | `/:id/preview` | No | 302 → blob URL, served inline |
+| DELETE | `/:id` | JWT | Delete own file (DB + blob) |
+
+> **Note the path shape:** `/:id/download`, not `/download/:id`.
+
+**Uploads are a two-step flow** — the browser asks for a token, uploads straight to Blob, then
+calls `/confirm`. Nothing but metadata passes through the server.
 
 ### Admin (`/api/admin/`)
 
@@ -176,8 +209,8 @@ All admin routes require the `x-admin-secret` header matching `ADMIN_SECRET` env
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/users` | List all users with file count and storage used |
-| DELETE | `/users/:id` | Delete a user + their files (DB + disk + saveDB) |
-| POST | `/cleanup` | Remove orphaned physical files not tracked in DB |
+| DELETE | `/users/:id` | Delete a user + their files (DB + blobs) |
+| POST | `/cleanup` | Remove orphaned blobs not tracked in DB |
 
 ---
 
@@ -189,9 +222,19 @@ JWT_SECRET=ud-secret-change-in-production-a7f3b2e9d1c4
 TOTAL_STORAGE_LIMIT_MB=500
 NODE_ENV=development
 ADMIN_SECRET=11-05-06
+
+# Database — libsql://... in production, file:./uploads/local.db for local dev
+TURSO_DATABASE_URL=file:./uploads/local.db
+TURSO_AUTH_TOKEN=
+
+# File storage — works from Vercel AND Railway
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
 ```
 
-**On Railway, set these in the Variables tab. The `.env` file is for local dev only.**
+`JWT_SECRET`, `TURSO_DATABASE_URL` and `BLOB_READ_WRITE_TOKEN` are **required**: `src/app.js`
+throws at boot naming any that are missing, rather than failing later with confusing 500s.
+
+**Set these in both the Vercel and Railway dashboards. The `.env` file is for local dev only.**
 
 ---
 
@@ -265,8 +308,8 @@ Two breakpoints:
 
 ### What It Can Do
 - **View all users** with file counts, storage used, and join dates
-- **Delete any user** (removes DB records + physical files + calls `saveDB()` — all in one shot)
-- **Cleanup orphaned files** (removes physical files on disk that have no DB record)
+- **Delete any user** (removes DB records + their blobs — all in one shot)
+- **Cleanup orphaned files** (removes blobs that have no DB record)
 
 ### Implementation
 - **Frontend**: Inline-styled modal injected into the DOM (no CSS changes needed)
@@ -277,23 +320,35 @@ Two breakpoints:
 
 ## 11. Known Issues & Gotchas
 
-### ⚠️ sql.js In-Memory Sync
-- **NEVER edit the database via `sqlite3` CLI** while the app is running. Changes will be lost or overwritten.
-- Always use the admin panel or API endpoints to modify data.
-- If you must use CLI: edit → immediately restart the app before any `saveDB()` call occurs.
+### ⚠️ Vercel's 4.5 MB body limit shapes the whole upload design
+- It applies to **requests and responses**, at infrastructure level — `vercel.json` cannot raise it.
+- That is why uploads go browser → Blob directly, and why downloads/previews are **redirects**
+  rather than streamed through the server. Don't "simplify" either back into a proxy.
 
-### ⚠️ better-sqlite3 Doesn't Work on Railway
-- Requires native C++ compilation that fails on Railway's build environment.
-- Don't switch to it unless you've confirmed it compiles in the Docker container.
+### ⚠️ Never write application data to disk
+- Vercel functions have a read-only filesystem (bar an ephemeral `/tmp`). Anything written there
+  disappears and is invisible to other instances.
+- This works fine on Railway, so a disk-based change can pass local testing and still break Vercel.
+
+### ⚠️ Both hosts share one database and blob store
+- A destructive admin action (delete user, cleanup) affects **both** deployments at once.
+
+### ⚠️ `onUploadCompleted` is deliberately unused
+- Vercel Blob cannot reach `localhost`, and off-Vercel it needs an explicit `callbackUrl`.
+- `POST /api/files/confirm` is the real path and works in every environment. The empty
+  `onUploadCompleted` exists only so Blob gets a 200 and stops retrying.
+
+### ⚠️ The upload SDK hides server error messages
+- On a non-2xx from `/upload-token`, `upload()` throws a generic "Failed to retrieve the client
+  token" and discards our JSON body. `explainUploadFailure()` in `app.js` re-queries storage-info
+  to reconstruct a useful message — keep it if you touch that path.
 
 ### ⚠️ Xbox Edge Browser
 - File downloads don't work on Xbox Series X Edge browser ("Downloads are not supported on this device").
-- Workaround: The "Preview" button opens files inline (`Content-Disposition: inline`) so users can right-click → "Set as desktop wallpaper" on images.
+- Workaround: The "Preview" button opens files inline so users can right-click → "Set as desktop wallpaper" on images. Blob serves the plain URL inline and the `?download=1` variant as an attachment, which is exactly how the two buttons differ.
 
-### ⚠️ Storage Bar After Manual Deletes
-- The storage bar reads from `SUM(size_bytes) FROM files` in the in-memory DB.
-- If files are deleted via CLI without removing physical files, storage appears freed in DB but disk space is still consumed.
-- Use the admin panel's "Cleanup orphaned files" to reconcile.
+### ⚠️ Rebuild the client bundle after upgrading @vercel/blob
+- `public/js/vendor/blob-client.js` is committed, not built at deploy time. Run `npm run build:client`.
 
 ---
 
@@ -302,49 +357,61 @@ Two breakpoints:
 ```bash
 cd "Universal Downloader"
 npm install
-npm run dev        # Starts with --watch for auto-restart on changes
+npm run build:client   # only needed after upgrading @vercel/blob
+npm run dev            # --watch for auto-restart
 # → http://localhost:3000
 ```
 
----
-
-## 13. Deploying to Railway
-
-1. Push changes to GitHub: `git add -A && git commit -m "message" && git push`
-2. Railway auto-deploys from the connected GitHub repo
-3. Ensure these **environment variables** are set in Railway's Variables tab:
-   - `JWT_SECRET` (change from default!)
-   - `TOTAL_STORAGE_LIMIT_MB=500`
-   - `ADMIN_SECRET=11-05-06`
-4. Ensure `/app/uploads/` is configured as a **persistent volume** in Railway
+The database can be a local file (`TURSO_DATABASE_URL=file:./uploads/local.db`) with no Turso
+account. Uploads still need a real `BLOB_READ_WRITE_TOKEN` — there is no local Blob emulator.
 
 ---
 
-## 14. Railway Console Quick Reference
+## 13. Deploying
 
-### Open SQLite CLI
+Both hosts run the same code against the same Turso database and Blob store.
+
+### Vercel
+1. Import the repo — **no** build command or framework preset.
+2. Set `JWT_SECRET`, `ADMIN_SECRET`, `TOTAL_STORAGE_LIMIT_MB`, `TURSO_DATABASE_URL`,
+   `TURSO_AUTH_TOKEN`, `BLOB_READ_WRITE_TOKEN`.
+3. `vercel.json` serves `public/` from the CDN and rewrites `/api/*` to `api/index.js`.
+
+### Railway
+1. Push to GitHub; Railway auto-deploys.
+2. Set the same variables (`PORT` is injected automatically).
+3. **No persistent volume needed any more** — nothing is written to disk.
+
+> ⚠️ Deploying this code without `TURSO_DATABASE_URL` / `BLOB_READ_WRITE_TOKEN` fails at boot
+> with a message naming the missing variables. Set them *before* redeploying.
+
+---
+
+## 14. Operations Quick Reference
+
+### Inspect the database
 ```bash
-sqlite3 /app/uploads/data.db
-```
-
-### List all users
-```sql
+turso db shell <database-name>
 SELECT id, username, email, created_at FROM users;
 ```
 
 ### Delete orphan file records (no matching user)
 ```sql
-PRAGMA foreign_keys = ON;
 DELETE FROM files WHERE user_id NOT IN (SELECT id FROM users);
 ```
 
-### Delete orphan physical files from disk
-```bash
-sqlite3 /app/uploads/data.db "SELECT stored_name FROM files;" > /tmp/db_files.txt
-cd /app/uploads && for f in *; do [ "$f" = "data.db" ] && continue; grep -qF "$f" /tmp/db_files.txt || (echo "Removing: $f" && rm "$f"); done
-```
+### Delete orphan blobs
+Use the admin panel's **Cleanup orphaned files** button — it reconciles the blob store against the
+`files` table. There is no filesystem to sweep by hand.
 
-### After any CLI edits: **RESTART** the Railway deployment immediately.
+> Unlike the old sql.js setup, editing the database directly is safe: there is no in-memory copy to
+> go stale, and no restart is required afterwards.
+
+### Migrate old disk-based data
+```bash
+node scripts/migrate-to-cloud.js --uploads-dir /path/to/old/uploads --dry-run
+node scripts/migrate-to-cloud.js --uploads-dir /path/to/old/uploads
+```
 
 ---
 
@@ -354,13 +421,17 @@ cd /app/uploads && for f in *; do [ "$f" = "data.db" ] && continue; grep -qF "$f
 
 | File | Purpose | Key Exports |
 |------|---------|-------------|
-| `src/server.js` | Express app setup, route registration, error handler | — |
-| `src/db/init.js` | sql.js database initialization, table creation | `initDB()`, `getDB()`, `saveDB()` |
+| `src/app.js` | Builds the Express app, validates env, registers routes | the app |
+| `src/server.js` | `listen()` wrapper for local/Railway | — |
+| `api/index.js` | Vercel function entry — re-exports the app | the app |
+| `src/db/index.js` | Turso client, lazy schema, query helpers | `one`, `all`, `run`, `ensureSchema`, `getClient` |
+| `src/storage/blob.js` | Vercel Blob wrappers | `head`, `remove`, `removeMany`, `listAll`, `isConfigError` |
 | `src/middleware/auth.js` | JWT verification middleware | `authRequired`, `authOptional` |
-| `src/middleware/upload.js` | Multer config with UUID filenames | `upload`, `UPLOADS_DIR` |
 | `src/routes/auth.js` | Registration, login, profile, account deletion | Express router |
-| `src/routes/files.js` | File CRUD, storage info, tags, download, preview | Express router |
+| `src/routes/files.js` | Listing, upload tokens, confirm, download, preview, delete | Express router |
 | `src/routes/admin.js` | Admin user management and cleanup | Express router |
+| `scripts/build-client.js` | Bundles `@vercel/blob/client` for the browser | — |
+| `scripts/migrate-to-cloud.js` | One-time disk → Turso + Blob migration | — |
 
 ### Frontend
 
@@ -371,6 +442,7 @@ cd /app/uploads && for f in *; do [ "$f" = "data.db" ] && continue; grep -qF "$f
 | `public/dashboard.html` | Authenticated user's dashboard |
 | `public/css/styles.css` | ALL styles — single file with CSS variables |
 | `public/js/app.js` | ALL frontend logic — API calls, DOM manipulation, admin panel |
+| `public/js/vendor/blob-client.js` | **Generated** — do not edit; run `npm run build:client` |
 
 ---
 
@@ -378,7 +450,9 @@ cd /app/uploads && for f in *; do [ "$f" = "data.db" ] && continue; grep -qF "$f
 
 1. **CSS changes** → Only modify `public/css/styles.css`. All design tokens are in `:root`.
 2. **Never remove comments** or docstrings that are unrelated to your changes.
-3. **Always call `saveDB()`** after any database write operation.
+3. **Never write application data to disk** — no SQLite files, no multer disk storage, no
+   `fs.writeFileSync` for user data. It breaks Vercel while still passing on Railway.
+   (There is no `saveDB()` any more; Turso writes are durable immediately.)
 4. **Test on mobile** — the user cares deeply about mobile responsiveness (two breakpoints: 768px and 480px).
 5. **No glow effects** — the user explicitly removed all blur/glow CSS effects. Don't add them back.
 6. **Font usage** — BebasNeue for big headings, Nohemi for subheadings, NetflixSans for body text. Don't use system fonts.
@@ -386,3 +460,6 @@ cd /app/uploads && for f in *; do [ "$f" = "data.db" ] && continue; grep -qF "$f
 8. **The "VIRAJ'S VAULT" title** — each letter is a separate `<span>`. The 4th span (the "A" in VIRAJ) has `id="trap-door"` and is the admin panel trigger. Don't change this.
 9. **Admin panel styles are inline** — they're injected via JavaScript, not in `styles.css`. Keep it self-contained.
 10. **Preview button** — exists for Xbox Edge compatibility. Opens files inline in a new tab. Don't remove it.
+11. **Keep downloads and previews as redirects** — never proxy file bytes through the server, or
+    anything over 4.5 MB breaks on Vercel.
+12. **Both deployments share one backend** — a destructive change hits Vercel and Railway at once.

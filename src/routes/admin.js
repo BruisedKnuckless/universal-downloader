@@ -1,8 +1,6 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const { getDB, saveDB } = require('../db/init');
-const { UPLOADS_DIR } = require('../middleware/upload');
+const { run, all, one } = require('../db');
+const blob = require('../storage/blob');
 
 const router = express.Router();
 
@@ -19,43 +17,11 @@ function adminRequired(req, res, next) {
 
 router.use(adminRequired);
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-function queryAll(sql, params = []) {
-  const db = getDB();
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  const rows = [];
-  while (stmt.step()) {
-    const cols = stmt.getColumnNames();
-    const vals = stmt.get();
-    const row = {};
-    cols.forEach((c, i) => row[c] = vals[i]);
-    rows.push(row);
-  }
-  stmt.free();
-  return rows;
-}
-
-function queryOne(sql, params = []) {
-  const db = getDB();
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  let row = null;
-  if (stmt.step()) {
-    const cols = stmt.getColumnNames();
-    const vals = stmt.get();
-    row = {};
-    cols.forEach((c, i) => row[c] = vals[i]);
-  }
-  stmt.free();
-  return row;
-}
-
 // ── GET /api/admin/users — list all users with file stats ───────────────────
-router.get('/users', (_req, res) => {
+router.get('/users', async (_req, res) => {
   try {
-    const users = queryAll(`
-      SELECT 
+    const users = await all(`
+      SELECT
         u.id, u.username, u.email, u.created_at,
         COUNT(f.id) as file_count,
         COALESCE(SUM(f.size_bytes), 0) as total_bytes
@@ -72,36 +38,27 @@ router.get('/users', (_req, res) => {
 });
 
 // ── DELETE /api/admin/users/:id — nuke a user + their files ─────────────────
-router.delete('/users/:id', (req, res) => {
+router.delete('/users/:id', async (req, res) => {
   try {
     const userId = req.params.id;
-    const db = getDB();
 
     // Check user exists
-    const user = queryOne('SELECT username FROM users WHERE id = ?', [userId]);
+    const user = await one('SELECT username FROM users WHERE id = ?', [userId]);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     // Get their files
-    const files = queryAll('SELECT stored_name FROM files WHERE user_id = ?', [userId]);
+    const files = await all('SELECT blob_url FROM files WHERE user_id = ?', [userId]);
 
-    // Delete physical files from disk
-    let deletedFiles = 0;
-    files.forEach(f => {
-      const filePath = path.join(UPLOADS_DIR, f.stored_name);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        deletedFiles++;
-      }
-    });
+    // Delete the stored blobs
+    await blob.removeMany(files.map(f => f.blob_url));
 
     // Delete DB records
-    db.run('DELETE FROM files WHERE user_id = ?', [userId]);
-    db.run('DELETE FROM users WHERE id = ?', [userId]);
-    saveDB();
+    await run('DELETE FROM files WHERE user_id = ?', [userId]);
+    await run('DELETE FROM users WHERE id = ?', [userId]);
 
     res.json({
       message: `User "${user.username}" deleted`,
-      filesRemoved: deletedFiles,
+      filesRemoved: files.length,
       dbRecordsRemoved: files.length
     });
   } catch (err) {
@@ -110,42 +67,30 @@ router.delete('/users/:id', (req, res) => {
   }
 });
 
-// ── POST /api/admin/cleanup — remove orphaned physical files ────────────────
-router.post('/cleanup', (_req, res) => {
+// ── POST /api/admin/cleanup — remove orphaned blobs ─────────────────────────
+router.post('/cleanup', async (_req, res) => {
   try {
-    // Get all stored_names from DB
-    const dbFiles = queryAll('SELECT stored_name FROM files');
+    // Every blob the database knows about
+    const dbFiles = await all('SELECT stored_name FROM files');
     const dbNames = new Set(dbFiles.map(f => f.stored_name));
 
-    // Scan uploads dir
-    const diskFiles = fs.readdirSync(UPLOADS_DIR);
+    // Everything actually sitting in the blob store
+    const stored = await blob.listAll();
 
-    let removed = 0;
-    let freedBytes = 0;
-    diskFiles.forEach(filename => {
-      // Skip the database file
-      if (filename === 'data.db') return;
+    const orphans = stored.filter(b => !dbNames.has(b.pathname));
+    const freedBytes = orphans.reduce((sum, b) => sum + (b.size || 0), 0);
 
-      const filePath = path.join(UPLOADS_DIR, filename);
-      const stat = fs.statSync(filePath);
-
-      // Skip directories
-      if (stat.isDirectory()) return;
-
-      // If file is not tracked in DB, it's orphaned — delete it
-      if (!dbNames.has(filename)) {
-        freedBytes += stat.size;
-        fs.unlinkSync(filePath);
-        removed++;
-      }
-    });
+    await blob.removeMany(orphans.map(b => b.url));
 
     res.json({
-      message: `Cleaned up ${removed} orphaned files`,
+      message: `Cleaned up ${orphans.length} orphaned files`,
       freedMB: (freedBytes / 1024 / 1024).toFixed(2)
     });
   } catch (err) {
     console.error('Admin cleanup error:', err);
+    if (blob.isConfigError(err)) {
+      return res.status(503).json({ error: blob.CONFIG_ERROR_MESSAGE });
+    }
     res.status(500).json({ error: 'Cleanup failed: ' + err.message });
   }
 });

@@ -1,49 +1,15 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const fs = require('fs');
-const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const { getDB, saveDB } = require('../db/init');
+const { run, all, one } = require('../db');
 const { authRequired } = require('../middleware/auth');
-const { UPLOADS_DIR } = require('../middleware/upload');
+const blob = require('../storage/blob');
 
 const router = express.Router();
 
-// ── Helper: run a SELECT that returns one row ───────────────────────────────
-function queryOne(sql, params = []) {
-  const db = getDB();
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  let row = null;
-  if (stmt.step()) {
-    const cols = stmt.getColumnNames();
-    const vals = stmt.get();
-    row = {};
-    cols.forEach((c, i) => row[c] = vals[i]);
-  }
-  stmt.free();
-  return row;
-}
-
-function queryAll(sql, params = []) {
-  const db = getDB();
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  const rows = [];
-  while (stmt.step()) {
-    const cols = stmt.getColumnNames();
-    const vals = stmt.get();
-    const row = {};
-    cols.forEach((c, i) => row[c] = vals[i]);
-    rows.push(row);
-  }
-  stmt.free();
-  return rows;
-}
-
 // ── Register ────────────────────────────────────────────────────────────────
-router.post('/register', (req, res) => {
+router.post('/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
@@ -63,18 +29,20 @@ router.post('/register', (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    const existing = queryOne('SELECT id FROM users WHERE email = ? OR username = ?', [email.toLowerCase(), username.toLowerCase()]);
+    // Compare usernames case-insensitively, since that is how they are stored.
+    const existing = await one(
+      'SELECT id FROM users WHERE email = ? OR LOWER(username) = ?',
+      [email.toLowerCase(), username.toLowerCase()]
+    );
     if (existing) {
       return res.status(409).json({ error: 'Email or username already taken' });
     }
 
     const id = uuidv4();
     const passwordHash = bcrypt.hashSync(password, 12);
-    const db = getDB();
 
-    db.run('INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)',
+    await run('INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)',
       [id, username, email.toLowerCase(), passwordHash]);
-    saveDB();
 
     const token = jwt.sign({ id, username, email: email.toLowerCase() }, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.status(201).json({ token, user: { id, username, email: email.toLowerCase() } });
@@ -85,14 +53,14 @@ router.post('/register', (req, res) => {
 });
 
 // ── Login ───────────────────────────────────────────────────────────────────
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    const user = queryOne('SELECT * FROM users WHERE email = ?', [email.toLowerCase()]);
+    const user = await one('SELECT * FROM users WHERE email = ?', [email.toLowerCase()]);
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
@@ -110,33 +78,31 @@ router.post('/login', (req, res) => {
 });
 
 // ── Get current user ────────────────────────────────────────────────────────
-router.get('/me', authRequired, (req, res) => {
-  const user = queryOne('SELECT id, username, email, created_at FROM users WHERE id = ?', [req.user.id]);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ user });
+router.get('/me', authRequired, async (req, res) => {
+  try {
+    const user = await one('SELECT id, username, email, created_at FROM users WHERE id = ?', [req.user.id]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ user });
+  } catch (err) {
+    console.error('Get me error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // ── Delete account (auth required — deletes user + all their files) ─────────
-router.delete('/account', authRequired, (req, res) => {
+router.delete('/account', authRequired, async (req, res) => {
   try {
     const userId = req.user.id;
 
     // 1. Get all files belonging to this user
-    const files = queryAll('SELECT stored_name FROM files WHERE user_id = ?', [userId]);
+    const files = await all('SELECT blob_url FROM files WHERE user_id = ?', [userId]);
 
-    // 2. Delete physical files from disk
-    files.forEach(f => {
-      const filePath = path.join(UPLOADS_DIR, f.stored_name);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    });
+    // 2. Delete the stored blobs
+    await blob.removeMany(files.map(f => f.blob_url));
 
-    // 3. Delete file records from DB
-    const db = getDB();
-    db.run('DELETE FROM files WHERE user_id = ?', [userId]);
-
-    // 4. Delete user record
-    db.run('DELETE FROM users WHERE id = ?', [userId]);
-    saveDB();
+    // 3. Delete file records, then the user
+    await run('DELETE FROM files WHERE user_id = ?', [userId]);
+    await run('DELETE FROM users WHERE id = ?', [userId]);
 
     res.json({ message: 'Account and all files deleted successfully' });
   } catch (err) {
@@ -146,4 +112,3 @@ router.delete('/account', authRequired, (req, res) => {
 });
 
 module.exports = router;
-

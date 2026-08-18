@@ -1,0 +1,10 @@
+node_modules
+uploads
+secret
+fonts
+*.db
+.env
+scripts
+Dockerfile
+Procfile
+CLAUDE.md

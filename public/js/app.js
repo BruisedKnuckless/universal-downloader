@@ -34,33 +34,66 @@ const API = {
   getTags:     ()       => API.request('GET', '/files/tags'),
   deleteFile:  (id)     => API.request('DELETE', `/files/${id}`),
 
-  uploadFile(file, tags, onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${this.base}/files/upload`);
+  /**
+   * Uploads straight from the browser to Vercel Blob, then records the result.
+   *
+   * The file never passes through our server, which is what keeps large uploads
+   * working on Vercel — its functions reject request bodies over 4.5 MB. The
+   * server still controls the upload: it issues a short-lived token capped at
+   * the storage remaining, so the quota is enforced by Blob itself.
+   */
+  async uploadFile(file, tags, onProgress) {
+    const token = localStorage.getItem('ud_token');
+    if (!token) throw new Error('Authentication required');
 
-      const token = localStorage.getItem('ud_token');
-      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (!window.VercelBlobClient) {
+      throw new Error('Upload library failed to load — try a hard refresh');
+    }
 
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
-      };
-      xhr.onload = () => {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-          else reject(new Error(data.error || 'Upload failed'));
-        } catch { reject(new Error('Upload failed')); }
-      };
-      xhr.onerror = () => reject(new Error('Network error'));
+    let blob;
+    try {
+      blob = await window.VercelBlobClient.upload(file.name, file, {
+        access: 'public',
+        handleUploadUrl: `${this.base}/files/upload-token`,
+        headers: { Authorization: `Bearer ${token}` },
+        clientPayload: JSON.stringify({ tags }),
+        multipart: true,
+        onUploadProgress: ({ percentage }) => {
+          if (onProgress) onProgress(Math.round(percentage));
+        }
+      });
+    } catch (err) {
+      // The SDK swallows our server's response body and reports a generic
+      // "Failed to retrieve the client token", so recover the real reason.
+      throw new Error(await explainUploadFailure(err, file));
+    }
 
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('tags', JSON.stringify(tags));
-      xhr.send(fd);
+    // Blob knows the file exists; our database does not until we say so.
+    return API.request('POST', '/files/confirm', {
+      url: blob.url,
+      originalName: file.name,
+      tags
     });
   }
 };
+
+/**
+ * Turns an opaque upload failure into something worth showing a person.
+ *
+ * The most common cause is the storage quota, which the server enforces by
+ * capping the upload token — so ask the server what is actually left.
+ */
+async function explainUploadFailure(err, file) {
+  try {
+    const info = await API.storageInfo();
+    if (file.size > info.remaining) {
+      return `"${file.name}" is ${formatSize(file.size)} — only ${formatSize(info.remaining)} of space left`;
+    }
+  } catch (_) { /* fall through to the original error */ }
+
+  if (!localStorage.getItem('ud_token')) return 'Your session expired — please log in again';
+  return err && err.message ? err.message : 'Upload failed';
+}
 
 // ── Auth State ──────────────────────────────────────────────────────────────
 const Auth = {

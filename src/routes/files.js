@@ -1,50 +1,21 @@
 const express = require('express');
 const path = require('path');
-const fs = require('fs');
+const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const { getDB, saveDB } = require('../db/init');
+const { handleUpload } = require('@vercel/blob/client');
+const { getDownloadUrl } = require('@vercel/blob');
+const { run, all, one } = require('../db');
 const { authRequired } = require('../middleware/auth');
-const { uploadWithLimit, UPLOADS_DIR } = require('../middleware/upload');
+const blob = require('../storage/blob');
 
 const router = express.Router();
 
 const TOTAL_STORAGE_LIMIT = (parseInt(process.env.TOTAL_STORAGE_LIMIT_MB) || 1024) * 1024 * 1024;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-function queryOne(sql, params = []) {
-  const db = getDB();
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  let row = null;
-  if (stmt.step()) {
-    const cols = stmt.getColumnNames();
-    const vals = stmt.get();
-    row = {};
-    cols.forEach((c, i) => row[c] = vals[i]);
-  }
-  stmt.free();
-  return row;
-}
-
-function queryAll(sql, params = []) {
-  const db = getDB();
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  const rows = [];
-  while (stmt.step()) {
-    const cols = stmt.getColumnNames();
-    const vals = stmt.get();
-    const row = {};
-    cols.forEach((c, i) => row[c] = vals[i]);
-    rows.push(row);
-  }
-  stmt.free();
-  return rows;
-}
-
 /** Bytes still available under the total community storage quota. */
-function remainingStorage() {
-  const usage = queryOne('SELECT COALESCE(SUM(size_bytes), 0) as total_used FROM files');
+async function remainingStorage() {
+  const usage = await one('SELECT COALESCE(SUM(size_bytes), 0) as total_used FROM files');
   return TOTAL_STORAGE_LIMIT - (usage ? usage.total_used : 0);
 }
 
@@ -60,20 +31,25 @@ function autoTag(mimeType, filename) {
 }
 
 // ── Storage info (public) ───────────────────────────────────────────────────
-router.get('/storage-info', (_req, res) => {
-  const result = queryOne('SELECT COALESCE(SUM(size_bytes), 0) as total_used FROM files');
-  const totalUsed = result ? result.total_used : 0;
-  res.json({
-    totalLimit: TOTAL_STORAGE_LIMIT,
-    totalUsed: totalUsed,
-    remaining: TOTAL_STORAGE_LIMIT - totalUsed
-  });
+router.get('/storage-info', async (_req, res) => {
+  try {
+    const result = await one('SELECT COALESCE(SUM(size_bytes), 0) as total_used FROM files');
+    const totalUsed = result ? result.total_used : 0;
+    res.json({
+      totalLimit: TOTAL_STORAGE_LIMIT,
+      totalUsed: totalUsed,
+      remaining: TOTAL_STORAGE_LIMIT - totalUsed
+    });
+  } catch (err) {
+    console.error('Storage info error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // ── All unique tags (public) ────────────────────────────────────────────────
-router.get('/tags', (_req, res) => {
+router.get('/tags', async (_req, res) => {
   try {
-    const rows = queryAll('SELECT tags FROM files');
+    const rows = await all('SELECT tags FROM files');
     const tagSet = new Set();
     rows.forEach(r => {
       JSON.parse(r.tags || '[]').forEach(t => tagSet.add(t));
@@ -86,10 +62,12 @@ router.get('/tags', (_req, res) => {
 });
 
 // ── List files (public, paginated, searchable, filterable) ──────────────────
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const { search, tag, page = 1, limit = 24 } = req.query;
-    const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(limit);
+    const { search, tag } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 24));
+    const offset = (page - 1) * limit;
     const params = [];
     const conditions = [];
 
@@ -104,22 +82,22 @@ router.get('/', (req, res) => {
 
     const where = conditions.length ? ' WHERE ' + conditions.join(' AND ') : '';
 
-    const countResult = queryOne(`SELECT COUNT(*) as total FROM files f${where}`, params);
+    const countResult = await one(`SELECT COUNT(*) as total FROM files f${where}`, params);
     const total = countResult ? countResult.total : 0;
 
-    const files = queryAll(`
+    const files = await all(`
       SELECT f.*, u.username AS uploader_name
       FROM files f JOIN users u ON f.user_id = u.id
       ${where}
       ORDER BY f.uploaded_at DESC
       LIMIT ? OFFSET ?
-    `, [...params, parseInt(limit), offset]);
+    `, [...params, limit, offset]);
 
     res.json({
       files: files.map(f => ({ ...f, tags: JSON.parse(f.tags || '[]') })),
       total,
-      page: parseInt(page),
-      totalPages: Math.ceil(total / parseInt(limit))
+      page,
+      totalPages: Math.ceil(total / limit)
     });
   } catch (err) {
     console.error('List files error:', err);
@@ -127,87 +105,136 @@ router.get('/', (req, res) => {
   }
 });
 
-// ── Upload (auth required) ─────────────────────────────────────────────────
+// ── Upload token (auth required) ────────────────────────────────────────────
 /**
- * Sizes multer to the storage remaining, so there is no separate per-file cap.
- * Computing it per request lets multer abort a stream that could never fit
- * instead of writing it to disk first and only then failing the quota check.
+ * Issues a short-lived token so the browser can upload straight to Vercel Blob.
+ *
+ * The file never passes through this server, which is what keeps large uploads
+ * working on Vercel (functions cap request bodies at 4.5 MB). The storage quota
+ * is enforced by capping the token at the bytes remaining, the same job the
+ * multer `fileSize` limit used to do.
  */
-function uploadWithinQuota(req, res, next) {
-  const remaining = remainingStorage();
-  if (remaining <= 0) {
-    return res.status(413).json({ error: 'Storage limit reached. Cannot upload more files.' });
+router.post('/upload-token', async (req, res) => {
+  try {
+    const jsonResponse = await handleUpload({
+      body: req.body,
+      request: req,
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+
+      onBeforeGenerateToken: async (_pathname, clientPayload) => {
+        // Authenticate here rather than with middleware: the upload-completed
+        // callback hits this same route without the user's Authorization header.
+        const header = req.headers.authorization;
+        if (!header || !header.startsWith('Bearer ')) {
+          throw new Error('Authentication required');
+        }
+        const user = jwt.verify(header.split(' ')[1], process.env.JWT_SECRET);
+
+        const remaining = await remainingStorage();
+        if (remaining <= 0) {
+          throw new Error('Storage limit reached. Cannot upload more files.');
+        }
+
+        // Never trust the client payload — it is attacker-controlled.
+        let tags = [];
+        try {
+          const parsed = JSON.parse(clientPayload || '{}');
+          if (Array.isArray(parsed.tags)) {
+            tags = parsed.tags.filter(t => typeof t === 'string').slice(0, 10);
+          }
+        } catch (_) { /* keep tags empty */ }
+
+        return {
+          // Blob itself rejects anything bigger, so an oversized file is
+          // stopped mid-stream instead of after it lands.
+          maximumSizeInBytes: remaining,
+          // Random suffix stops one user overwriting another user's pathname.
+          addRandomSuffix: true,
+          tokenPayload: JSON.stringify({ userId: user.id, tags })
+        };
+      },
+
+      // Not relied upon: it cannot reach localhost and needs an explicit
+      // callbackUrl off Vercel. The /confirm route below is the real path;
+      // this exists so Blob gets a 200 and stops retrying.
+      onUploadCompleted: async () => {}
+    });
+
+    res.json(jsonResponse);
+  } catch (err) {
+    console.error('Upload token error:', err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── Confirm an upload (auth required) ───────────────────────────────────────
+/**
+ * Records a blob that the browser finished uploading.
+ *
+ * Size and content type come from Blob itself rather than the client, and the
+ * quota is re-checked here; a file that would overrun it is deleted again.
+ */
+router.post('/confirm', authRequired, async (req, res) => {
+  const { url, originalName, tags } = req.body || {};
+  if (!url || !originalName) {
+    return res.status(400).json({ error: 'url and originalName are required' });
   }
 
-  // +1 because busboy aborts when the file size *equals* the limit, so a file
-  // that exactly fills the remaining space would otherwise be rejected.
-  uploadWithLimit(remaining + 1).single('file')(req, res, (err) => {
-    if (!err) return next();
+  try {
+    // Authoritative metadata — never trust a client-reported size.
+    const meta = await blob.head(url);
+    if (!meta) return res.status(404).json({ error: 'Uploaded file not found in storage' });
 
-    // Multer may leave a partial file behind when it aborts mid-stream.
-    if (req.file && req.file.path) {
-      try { fs.unlinkSync(req.file.path); } catch (_) {}
-    }
-    if (err.code === 'LIMIT_FILE_SIZE') {
+    const remaining = await remainingStorage();
+    if (meta.size > remaining) {
+      await blob.remove(url);
       return res.status(413).json({
         error: `File too large. Only ${(remaining / 1024 / 1024).toFixed(2)} MB of storage remaining.`
       });
     }
-    next(err);
-  });
-}
 
-router.post('/upload', authRequired, uploadWithinQuota, (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'No file provided' });
-
-    // Check storage quota
-    const usageResult = queryOne('SELECT COALESCE(SUM(size_bytes), 0) as total_used FROM files');
-    const totalUsed = usageResult ? usageResult.total_used : 0;
-    if (totalUsed + req.file.size > TOTAL_STORAGE_LIMIT) {
-      fs.unlinkSync(req.file.path);
-      return res.status(413).json({ error: 'Storage limit reached. Cannot upload more files.' });
-    }
-
-    // Build tags: auto-detected category + user-supplied custom tags
-    const category = autoTag(req.file.mimetype, req.file.originalname);
-    let userTags = [];
-    try { userTags = req.body.tags ? JSON.parse(req.body.tags) : []; } catch (_) { userTags = []; }
-    const tags = [category, ...userTags.filter(t => t && t !== category)];
+    const mimeType = meta.contentType || 'application/octet-stream';
+    const category = autoTag(mimeType, originalName);
+    const userTags = Array.isArray(tags) ? tags.filter(t => t && t !== category) : [];
+    const allTags = [category, ...userTags];
 
     const id = uuidv4();
-    const db = getDB();
-    db.run(
-      'INSERT INTO files (id, original_name, stored_name, mime_type, size_bytes, tags, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, JSON.stringify(tags), req.user.id]
+    await run(
+      `INSERT INTO files (id, original_name, stored_name, blob_url, mime_type, size_bytes, tags, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, originalName, meta.pathname, meta.url, mimeType, meta.size, JSON.stringify(allTags), req.user.id]
     );
-    saveDB();
 
-    const file = queryOne('SELECT f.*, u.username AS uploader_name FROM files f JOIN users u ON f.user_id = u.id WHERE f.id = ?', [id]);
+    const file = await one(
+      'SELECT f.*, u.username AS uploader_name FROM files f JOIN users u ON f.user_id = u.id WHERE f.id = ?',
+      [id]
+    );
     res.status(201).json({ file: { ...file, tags: JSON.parse(file.tags || '[]') } });
   } catch (err) {
-    console.error('Upload error:', err);
-    if (req.file) try { fs.unlinkSync(req.file.path); } catch (_) {}
+    // A duplicate stored_name means this blob is already recorded — most likely
+    // a double-submit, or someone claiming a blob that is not theirs.
+    if (String(err.message || '').includes('UNIQUE constraint failed')) {
+      return res.status(409).json({ error: 'This file has already been recorded' });
+    }
+    console.error('Confirm upload error:', err);
+    if (blob.isConfigError(err)) {
+      return res.status(503).json({ error: blob.CONFIG_ERROR_MESSAGE });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ── Download (public) ──────────────────────────────────────────────────────
-router.get('/:id/download', (req, res) => {
+router.get('/:id/download', async (req, res) => {
   try {
-    const file = queryOne('SELECT * FROM files WHERE id = ?', [req.params.id]);
+    const file = await one('SELECT * FROM files WHERE id = ?', [req.params.id]);
     if (!file) return res.status(404).json({ error: 'File not found' });
 
-    const filePath = path.join(UPLOADS_DIR, file.stored_name);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing from storage' });
+    await run('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [file.id]);
 
-    const db = getDB();
-    db.run('UPDATE files SET download_count = download_count + 1 WHERE id = ?', [file.id]);
-    saveDB();
-
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.original_name)}"`);
-    res.setHeader('Content-Type', file.mime_type);
-    res.sendFile(filePath);
+    // Redirect rather than stream: Vercel caps response bodies at 4.5 MB, so a
+    // large file cannot be proxied through the server at all.
+    res.redirect(getDownloadUrl(file.blob_url));
   } catch (err) {
     console.error('Download error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -215,17 +242,13 @@ router.get('/:id/download', (req, res) => {
 });
 
 // ── Preview / inline view (public) ─────────────────────────────────────────
-router.get('/:id/preview', (req, res) => {
+router.get('/:id/preview', async (req, res) => {
   try {
-    const file = queryOne('SELECT * FROM files WHERE id = ?', [req.params.id]);
+    const file = await one('SELECT * FROM files WHERE id = ?', [req.params.id]);
     if (!file) return res.status(404).json({ error: 'File not found' });
 
-    const filePath = path.join(UPLOADS_DIR, file.stored_name);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing from storage' });
-
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.original_name)}"`);
-    res.setHeader('Content-Type', file.mime_type);
-    res.sendFile(filePath);
+    // Plain blob URL is served inline — keeps the Xbox Edge workaround working.
+    res.redirect(file.blob_url);
   } catch (err) {
     console.error('Preview error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -233,22 +256,21 @@ router.get('/:id/preview', (req, res) => {
 });
 
 // ── Delete (auth required, owner only) ──────────────────────────────────────
-router.delete('/:id', authRequired, (req, res) => {
+router.delete('/:id', authRequired, async (req, res) => {
   try {
-    const file = queryOne('SELECT * FROM files WHERE id = ?', [req.params.id]);
+    const file = await one('SELECT * FROM files WHERE id = ?', [req.params.id]);
     if (!file) return res.status(404).json({ error: 'File not found' });
     if (file.user_id !== req.user.id) return res.status(403).json({ error: 'You can only delete your own files' });
 
-    const filePath = path.join(UPLOADS_DIR, file.stored_name);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-    const db = getDB();
-    db.run('DELETE FROM files WHERE id = ?', [file.id]);
-    saveDB();
+    await blob.remove(file.blob_url);
+    await run('DELETE FROM files WHERE id = ?', [file.id]);
 
     res.json({ message: 'File deleted successfully' });
   } catch (err) {
     console.error('Delete error:', err);
+    if (blob.isConfigError(err)) {
+      return res.status(503).json({ error: blob.CONFIG_ERROR_MESSAGE });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });
