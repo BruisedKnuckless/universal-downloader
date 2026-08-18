@@ -50,7 +50,6 @@ Create a `.env` file in the root:
 ```env
 PORT=3000
 JWT_SECRET=your-secret-key-here
-MAX_FILE_SIZE_MB=100
 TOTAL_STORAGE_LIMIT_MB=500
 ```
 

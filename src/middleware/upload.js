@@ -18,11 +18,16 @@ const storage = multer.diskStorage({
   }
 });
 
-const maxFileSize = (parseInt(process.env.MAX_FILE_SIZE_MB) || 100) * 1024 * 1024;
+/**
+ * Builds a multer instance capped at `maxBytes` for a single request.
+ * There is no fixed per-file limit — callers pass the storage remaining so
+ * multer aborts an oversized stream instead of filling the volume.
+ */
+function uploadWithLimit(maxBytes) {
+  return multer({
+    storage,
+    limits: { fileSize: maxBytes }
+  });
+}
 
-const upload = multer({
-  storage,
-  limits: { fileSize: maxFileSize }
-});
-
-module.exports = { upload, UPLOADS_DIR };
+module.exports = { uploadWithLimit, UPLOADS_DIR };

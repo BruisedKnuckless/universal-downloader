@@ -4,7 +4,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const { getDB, saveDB } = require('../db/init');
 const { authRequired } = require('../middleware/auth');
-const { upload, UPLOADS_DIR } = require('../middleware/upload');
+const { uploadWithLimit, UPLOADS_DIR } = require('../middleware/upload');
 
 const router = express.Router();
 
@@ -40,6 +40,12 @@ function queryAll(sql, params = []) {
   }
   stmt.free();
   return rows;
+}
+
+/** Bytes still available under the total community storage quota. */
+function remainingStorage() {
+  const usage = queryOne('SELECT COALESCE(SUM(size_bytes), 0) as total_used FROM files');
+  return TOTAL_STORAGE_LIMIT - (usage ? usage.total_used : 0);
 }
 
 function autoTag(mimeType, filename) {
@@ -122,7 +128,36 @@ router.get('/', (req, res) => {
 });
 
 // ── Upload (auth required) ─────────────────────────────────────────────────
-router.post('/upload', authRequired, upload.single('file'), (req, res) => {
+/**
+ * Sizes multer to the storage remaining, so there is no separate per-file cap.
+ * Computing it per request lets multer abort a stream that could never fit
+ * instead of writing it to disk first and only then failing the quota check.
+ */
+function uploadWithinQuota(req, res, next) {
+  const remaining = remainingStorage();
+  if (remaining <= 0) {
+    return res.status(413).json({ error: 'Storage limit reached. Cannot upload more files.' });
+  }
+
+  // +1 because busboy aborts when the file size *equals* the limit, so a file
+  // that exactly fills the remaining space would otherwise be rejected.
+  uploadWithLimit(remaining + 1).single('file')(req, res, (err) => {
+    if (!err) return next();
+
+    // Multer may leave a partial file behind when it aborts mid-stream.
+    if (req.file && req.file.path) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+    }
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `File too large. Only ${(remaining / 1024 / 1024).toFixed(2)} MB of storage remaining.`
+      });
+    }
+    next(err);
+  });
+}
+
+router.post('/upload', authRequired, uploadWithinQuota, (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
 

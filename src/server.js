@@ -42,9 +42,7 @@ async function start() {
   app.use((err, _req, res, _next) => {
     console.error('Unhandled error:', err);
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({
-        error: `File too large. Maximum size is ${process.env.MAX_FILE_SIZE_MB || 100} MB`
-      });
+      return res.status(413).json({ error: 'File too large for the remaining storage.' });
     }
     res.status(500).json({ error: 'Internal server error' });
   });

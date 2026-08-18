@@ -225,6 +225,9 @@ async function initLibrary() {
 let currentPage = 1;
 let currentTag = '';
 
+// Storage left, in bytes — also the effective per-file upload cap (dashboard).
+let storageRemaining = null;
+
 async function loadStorageBar() {
   try {
     const info = await API.storageInfo();
@@ -236,6 +239,10 @@ async function loadStorageBar() {
       if (pct > 85) fill.classList.add('warning');
     }
     if (label) label.textContent = `${formatSize(info.totalUsed)} / ${formatSize(info.totalLimit)} used`;
+
+    storageRemaining = info.remaining;
+    const limitNote = document.getElementById('upload-limit-note');
+    if (limitNote) limitNote.textContent = `or click to browse · ${formatSize(info.remaining)} of space left`;
   } catch (_) {}
 }
 
@@ -435,6 +442,13 @@ function setupUploadZone() {
 }
 
 function selectFile(file) {
+  // Catch a doomed upload before waiting out the whole transfer.
+  if (storageRemaining !== null && file.size > storageRemaining) {
+    Toast.error(`"${file.name}" is ${formatSize(file.size)} — only ${formatSize(storageRemaining)} of space left`);
+    document.getElementById('file-input').value = '';
+    return;
+  }
+
   selectedFile = file;
   const form = document.getElementById('upload-form');
   const previewName = document.getElementById('preview-name');
